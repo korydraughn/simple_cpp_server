@@ -1,0 +1,30 @@
+// message.fbs
+
+namespace kdd.scpps;
+
+enum api_no : uint16
+{
+    data_object_open = 0,
+    data_object_close,
+    data_object_read,
+    data_object_write,
+    data_object_seek,
+    data_object_truncate,
+    data_object_unlink
+}
+
+table user_info
+{
+    name : string;
+}
+
+table message
+{
+    minimum_protocol_version : int16;
+    api_number               : api_no;
+    user                     : user_info;
+    proxy_user               : user_info;
+    payload                  : string;
+}
+
+root_type message;
