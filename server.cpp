@@ -4,49 +4,80 @@
 
 #include <fmt/format.h>
 
-#include <syslog.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <syslog.h>
 #include <unistd.h>
 
-#include <iostream>
 #include <memory>
 #include <array>
-#include <string>
 
 using boost::asio::ip::tcp;
+
+template <typename T>
+void ignore_result(T _arg)
+{
+    (void) _arg;
+}
 
 class server
 {
 public:
-    server(boost::asio::io_service& _io_service, std::int16_t _port)
+    server(boost::asio::io_service& _io_service, int _port)
         : io_service_{_io_service}
-        , signals_{_io_service, SIGCHLD}
+        , signals_{_io_service, SIGTERM, SIGINT, SIGCHLD}
         , acceptor_{_io_service, tcp::endpoint(tcp::v4(), _port)}
         , socket_{_io_service}
     {
-        do_signal_wait();
+        wait_for_signal();
         do_accept();
     } // server (constructor)
 
 private:
-    void do_signal_wait()
+    void wait_for_signal()
     {
-        signals_.async_wait([this](auto, auto) {
+        signals_.async_wait([this](auto, auto _signal)
+        {
+            const char* signal_name = "?";
+            switch (_signal) {
+                case SIGTERM: signal_name = "SIGTERM"; break;
+                case SIGINT : signal_name = "SIGINT" ; break;
+                case SIGCHLD: signal_name = "SIGCHLD"; break;
+            }
+
             // Only the parent process should check for this signal. We can determine
             // whether we are in the parent by checking if the acceptor is still open.
             if (acceptor_.is_open()) {
-                syslog(LOG_INFO | LOG_USER, "Caught signal: %m");
-                for (int status = 0; waitpid(-1, &status, WNOHANG) > 0;) {}
-                do_signal_wait();
+                syslog(LOG_INFO | LOG_USER, "Caught signal (parent) [pid:%d, signal:%s]: %m", getpid(), signal_name);
+
+                // Reap completed child processes so that we don't end up with zombies.
+                if (SIGCHLD == _signal) {
+                    for (int status = 0; waitpid(-1, &status, WNOHANG) > 0;) {}
+                }
+
+                if (SIGTERM == _signal || SIGINT == _signal) {
+                    acceptor_.close();
+                    syslog(LOG_INFO | LOG_USER, "Closed acceptor socket: %m");
+                }
+                else {
+                    syslog(LOG_INFO | LOG_USER, "Rescheduled signal handlers: %m");
+                    wait_for_signal();
+                }
+            }
+            else {
+                syslog(LOG_INFO | LOG_USER, "Caught signal (child) [pid:%d]: %m", getpid());
             }
         });
-    } // do_signal_wait
+    } // wait_for_signal
 
     void do_accept()
     {
         acceptor_.async_accept(socket_, [this](auto _ec)
         {
+            if (!acceptor_.is_open()) {
+                return;
+            }
+
             if (!_ec) {
                 // Inform the io_service that we are about to fork. The io_service cleans
                 // up any internal resources, such as threads, that may interfere with
@@ -63,10 +94,19 @@ private:
                     // acceptor. It remains open in the parent.
                     acceptor_.close();
 
-                    // This is where the child starts!
-                    syslog(LOG_INFO | LOG_USER, "Forked child is done");
+                    // The child process is not interested in processing the SIGCHLD signal.
+                    signals_.remove(SIGCHLD);
 
-                    io_service_.stop();
+                    syslog(LOG_INFO | LOG_USER, "Forked child [pid:%d]", getpid());
+
+                    // This is where the child starts!
+                    //
+                    // Start the request-response loop.
+                    // 1. Client needs to negotiate with server about communication rules.
+                    // 2. Client must authenticate the user and proxy user against the
+                    //    server.
+                    // 3. Verify the API request information. Is the client allowed to
+                    //    perform the operation?
                 }
                 else {
                     // Inform the io_service that the fork is finished (or failed) and that
@@ -92,7 +132,7 @@ private:
     tcp::socket socket_;
 }; // class server
 
-int main(int _argc, char** _argv)
+int main(int _argc, const char** _argv)
 {
     if (_argc != 2) {
         fmt::print("Usage: {} <port>\n", _argv[0]);
@@ -106,14 +146,6 @@ int main(int _argc, char** _argv)
         // started from a shell, this means any errors will be reported back to the
         // user.
         server svr{io_service, std::stoi(_argv[1])};
-
-        // Register signal handlers so that the daemon may be shut down. You may
-        // also want to register for other signals, such as SIGHUP to trigger a
-        // re-read of a configuration file.
-        boost::asio::signal_set signals{io_service, SIGINT, SIGTERM};
-        signals.async_wait([&io_service](auto, auto) {
-            io_service.stop();
-        });
 
         // Inform the io_service that we are about to become a daemon. The
         // io_service cleans up any internal resources, such as threads, that may
@@ -156,7 +188,7 @@ int main(int _argc, char** _argv)
         // on a mounted filesystem, which means that the running daemon would
         // prevent this filesystem from being unmounted. Changing to the root
         // directory avoids this problem.
-        chdir("/");
+        ignore_result(chdir("/"));
 
         // The file mode creation mask is also inherited from the parent process.
         // We don't want to restrict the permissions on files created by the
@@ -213,7 +245,7 @@ int main(int _argc, char** _argv)
     }
     catch (const std::exception& e) {
         syslog(LOG_ERR | LOG_USER, "Exception: %s", e.what());
-        std::cerr << "Exception: " << e.what() << std::endl;
+        fmt::print(stderr, "Exception: {}", e.what());
     }
 }
 
