@@ -1,6 +1,7 @@
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/signal_set.hpp>
+#include <boost/filesystem.hpp>
 
 #include <fmt/format.h>
 
@@ -19,6 +20,64 @@ void ignore_result(T _arg)
 {
     (void) _arg;
 }
+
+int create_pid_file()
+{
+    const auto pid_file = boost::filesystem::temp_directory_path() / "simple_cpp_server.pid";
+
+    // Open the PID file. If it does not exist, create it and give the owner
+    // permission to read and write to it.
+    const auto fd = open(pid_file.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd == -1) {
+        syslog(LOG_ERR | LOG_USER, "Could not open PID file.");
+        return -1;
+    }
+
+    // Get the current open flags for the open file descriptor.
+    const auto flags = fcntl(fd, F_GETFD);
+    if (flags == -1) {
+        syslog(LOG_ERR | LOG_USER, "Could not retrieve open flags for PID file.");
+        return -1;
+    }
+
+    // Enable the FD_CLOEXEC option for the open file descriptor.
+    // This option will cause successful calls to exec() to close the file descriptor.
+    // Keep in mind that record locks are NOT inherited by forked child processes.
+    if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+        syslog(LOG_ERR | LOG_USER, "Could not set FD_CLOEXEC on PID file.");
+        return -1;
+    }
+
+    struct flock input;
+    input.l_type = F_WRLCK;
+    input.l_whence = SEEK_SET;
+    input.l_start = 0;
+    input.l_len = 0;
+
+    // Try to acquire the write lock on the PID file. If we cannot get the lock,
+    // another instance of the application must already be running or something
+    // weird is going on.
+    if (fcntl(fd, F_SETLK, &input) == -1) {
+        if (EAGAIN == errno || EACCES == errno) {
+            syslog(LOG_ERR | LOG_USER, "Could not acquire write lock for PID file. Another instance "
+                   "could be running already.");
+            return -1;
+        }
+    }
+    
+    if (ftruncate(fd, 0) == -1) {
+        syslog(LOG_ERR | LOG_USER, "Could not truncate PID file's contents.");
+        return -1;
+    }
+
+    const auto contents = fmt::format("{}\n", getpid());
+    if (write(fd, contents.data(), contents.size()) != static_cast<long>(contents.size())) {
+        syslog(LOG_ERR | LOG_USER, "Could not write PID to PID file.");
+        return -1;
+    }
+
+    return 0;
+} // create_pid_file
 
 class server
 {
@@ -48,7 +107,7 @@ private:
             // Only the parent process should check for this signal. We can determine
             // whether we are in the parent by checking if the acceptor is still open.
             if (acceptor_.is_open()) {
-                syslog(LOG_INFO | LOG_USER, "Caught signal (parent) [pid:%d, signal:%s]: %m", getpid(), signal_name);
+                syslog(LOG_INFO | LOG_USER, "Caught signal (parent) [pid:%d, signal:%s]", getpid(), signal_name);
 
                 // Reap completed child processes so that we don't end up with zombies.
                 if (SIGCHLD == _signal) {
@@ -57,15 +116,15 @@ private:
 
                 if (SIGTERM == _signal || SIGINT == _signal) {
                     acceptor_.close();
-                    syslog(LOG_INFO | LOG_USER, "Closed acceptor socket: %m");
+                    syslog(LOG_INFO | LOG_USER, "Closed acceptor socket");
                 }
                 else {
-                    syslog(LOG_INFO | LOG_USER, "Rescheduled signal handlers: %m");
+                    syslog(LOG_INFO | LOG_USER, "Rescheduled signal handlers");
                     wait_for_signal();
                 }
             }
             else {
-                syslog(LOG_INFO | LOG_USER, "Caught signal (child) [pid:%d]: %m", getpid());
+                syslog(LOG_INFO | LOG_USER, "Caught signal (child) [pid:%d]", getpid());
             }
         });
     } // wait_for_signal
@@ -107,6 +166,11 @@ private:
                     //    server.
                     // 3. Verify the API request information. Is the client allowed to
                     //    perform the operation?
+
+                    // This allows the child process to exit normally. Another way to
+                    // achieve this is by replacing signals_.remove(SIGCHLD) with
+                    // signals_.cancel().
+                    io_service_.stop();
                 }
                 else {
                     // Inform the io_service that the fork is finished (or failed) and that
@@ -238,10 +302,14 @@ int main(int _argc, const char** _argv)
         // that need to be private to the new process.
         io_service.notify_fork(boost::asio::io_service::fork_child);
 
+        if (create_pid_file()) {
+            return 1;
+        }
+
         // The io_service can now be used normally.
-        syslog(LOG_INFO | LOG_USER, "Daemon started");
+        syslog(LOG_INFO | LOG_USER, "Daemon started [pid:%d]", getpid());
         io_service.run();
-        syslog(LOG_INFO | LOG_USER, "Daemon stopped");
+        syslog(LOG_INFO | LOG_USER, "Daemon stopped [pid:%d]", getpid());
     }
     catch (const std::exception& e) {
         syslog(LOG_ERR | LOG_USER, "Exception: %s", e.what());
