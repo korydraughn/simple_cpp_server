@@ -15,12 +15,6 @@
 
 using boost::asio::ip::tcp;
 
-template <typename T>
-void ignore_result(T _arg)
-{
-    (void) _arg;
-}
-
 int create_pid_file()
 {
     const auto pid_file = boost::filesystem::temp_directory_path() / "simple_cpp_server.pid";
@@ -225,7 +219,7 @@ int main(int _argc, const char** _argv)
         // on a mounted filesystem, which means that the running daemon would
         // prevent this filesystem from being unmounted. Changing to the root
         // directory avoids this problem.
-        ignore_result(chdir("/"));
+        [[maybe_unused]] auto ec = chdir("/");
 
         // The file mode creation mask is also inherited from the parent process.
         // We don't want to restrict the permissions on files created by the
