@@ -1,9 +1,14 @@
+#include "message_generated.h"
+
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/read.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/endian/buffers.hpp>
 
 #include <fmt/format.h>
+#include <fmt/ostream.h>
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -81,6 +86,7 @@ public:
         , signals_{_io_service, SIGTERM, SIGINT, SIGCHLD}
         , acceptor_{_io_service, tcp::endpoint(tcp::v4(), _port)}
         , socket_{_io_service}
+        , buffer_{}
     {
         wait_for_signal();
         do_accept();
@@ -160,11 +166,12 @@ private:
                     //    server.
                     // 3. Verify the API request information. Is the client allowed to
                     //    perform the operation?
+                    do_read();
 
                     // This allows the child process to exit normally. Another way to
                     // achieve this is by replacing signals_.remove(SIGCHLD) with
                     // signals_.cancel().
-                    io_service_.stop();
+                    //io_service_.stop();
                 }
                 else {
                     // Inform the io_service that the fork is finished (or failed) and that
@@ -184,10 +191,26 @@ private:
         });
     } // do_accept
 
+    void do_read()
+    {
+        using int_type = boost::endian::little_int32_buf_t;
+
+        boost::asio::async_read(socket_, boost::asio::buffer(&buffer_, sizeof(int_type)),
+            [this](auto _ec, auto _length) {
+                if (!_ec) {
+                    syslog(LOG_INFO | LOG_USER, "%s", fmt::format("Bytes read: {}, value: {}", _length, buffer_).c_str());
+                }
+
+                io_service_.stop();
+            });
+    } // do_read
+
     boost::asio::io_service& io_service_;
     boost::asio::signal_set signals_;
     tcp::acceptor acceptor_;
     tcp::socket socket_;
+    boost::endian::little_int32_buf_t buffer_;
+    //std::array<char, 512> buffer_;
 }; // class server
 
 int main(int _argc, const char** _argv)
