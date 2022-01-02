@@ -86,7 +86,8 @@ public:
         , signals_{_io_service, SIGTERM, SIGINT, SIGCHLD}
         , acceptor_{_io_service, tcp::endpoint(tcp::v4(), _port)}
         , socket_{_io_service}
-        , buffer_{}
+        , message_size_{}
+        , message_{}
     {
         wait_for_signal();
         do_accept();
@@ -195,22 +196,48 @@ private:
     {
         using int_type = boost::endian::little_int32_buf_t;
 
-        boost::asio::async_read(socket_, boost::asio::buffer(&buffer_, sizeof(int_type)),
+        boost::asio::async_read(socket_, boost::asio::buffer(&message_size_, sizeof(int_type)),
             [this](auto _ec, auto _length) {
                 if (!_ec) {
-                    syslog(LOG_INFO | LOG_USER, "%s", fmt::format("Bytes read: {}, value: {}", _length, buffer_).c_str());
+                    const auto msg = fmt::format("Bytes read: {}, value: {}", _length, message_size_);
+                    syslog(LOG_INFO | LOG_USER, "%s", msg.c_str());
+                    do_read_body();
+                    return;
+                }
+
+                syslog(LOG_ERR | LOG_USER, "%s", fmt::format("Network error: {}", _ec.message()).c_str());
+                io_service_.stop();
+            });
+    } // do_read
+
+    void do_read_body()
+    {
+        boost::asio::async_read(socket_, boost::asio::buffer(message_, message_size_.value()),
+            [this](auto _ec, auto _length) {
+                if (!_ec) {
+                    syslog(LOG_INFO | LOG_USER, "%s", fmt::format("Bytes read: {}, value: {}", _length, message_size_).c_str());
+
+                    using namespace kdd::scpps;
+                    auto msg = Getmessage((std::uint8_t*) message_.data());
+
+                    syslog(LOG_INFO | LOG_USER,
+                           "min protocol version: %i, user: %s, proxy user: %s, payload: %s",
+                           msg->minimum_protocol_version(),
+                           msg->user()->name()->c_str(),
+                           msg->proxy_user()->name()->c_str(),
+                           msg->payload()->c_str());
                 }
 
                 io_service_.stop();
             });
-    } // do_read
+    } // do_read_body
 
     boost::asio::io_service& io_service_;
     boost::asio::signal_set signals_;
     tcp::acceptor acceptor_;
     tcp::socket socket_;
-    boost::endian::little_int32_buf_t buffer_;
-    //std::array<char, 512> buffer_;
+    boost::endian::little_int32_buf_t message_size_;
+    std::array<char, 4096> message_;
 }; // class server
 
 int main(int _argc, const char** _argv)

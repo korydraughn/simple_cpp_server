@@ -4,6 +4,7 @@
 #include <boost/endian/buffers.hpp>
 
 #include <fmt/format.h>
+#include <fmt/ostream.h>
 
 #include <iostream>
 #include <string>
@@ -23,19 +24,23 @@ int main(int _argc, char* _argv[])
             fmt::print(stderr, "Unable to connect: {}\n", s.error().message());
             return 1;
         }
-#if 0
+
         namespace fbs = flatbuffers;
         namespace kdd = kdd::scpps;
 
-        fbs::FlatBufferBuilder builder;
+        fbs::FlatBufferBuilder builder{1024};
+
+        // FlatBuffers requires that nested data be created first.
+        // Hence, the creation of strings here.
+        auto username = builder.CreateString("kory");
+        auto proxy_username = builder.CreateString("rods");
+        auto payload = builder.CreateString(_argv[2]);
 
         kdd::user_infoBuilder user_builder{builder};
-        auto username = builder.CreateString("kory");
         user_builder.add_name(username);
         auto user = user_builder.Finish();
 
         kdd::user_infoBuilder proxy_user_builder{builder};
-        auto proxy_username = builder.CreateString("rods");
         proxy_user_builder.add_name(proxy_username);
         auto proxy_user = proxy_user_builder.Finish();
 
@@ -44,18 +49,16 @@ int main(int _argc, char* _argv[])
         message_builder.add_user(user);
         message_builder.add_proxy_user(proxy_user);
         message_builder.add_api_number(kdd::api_no_data_object_open);
-        auto payload = builder.CreateString(_argv[2]);
         message_builder.add_payload(payload);
         auto msg = message_builder.Finish();
 
         builder.Finish(msg);
 
-        s.write((char*) builder.GetBufferPointer(), builder.GetSize());
-#else
         using int_type = boost::endian::little_int32_buf_t;
-        int_type v{538};
+        int_type v(builder.GetSize());
+        fmt::print("message size (binary): {}\n", v);
         s.write((char*) &v, sizeof(int_type));
-#endif
+        s.write((char*) builder.GetBufferPointer(), builder.GetSize());
     }
     catch (const std::exception& e) {
         fmt::print(stderr, "Exception: {}\n", e.what());
